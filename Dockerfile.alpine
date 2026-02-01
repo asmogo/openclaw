@@ -92,6 +92,8 @@ COPY --from=builder /app/package.json /app/pnpm-workspace.yaml /app/.npmrc ./
 COPY --from=builder /app/openclaw.mjs ./
 COPY --from=builder /app/skills ./skills
 COPY --from=builder /app/patches ./patches
+COPY --from=builder /app/docs ./docs
+COPY --from=builder /app/scripts ./scripts
 
 ENV NODE_ENV=production
 
