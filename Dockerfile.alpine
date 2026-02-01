@@ -1,0 +1,109 @@
+################################################################################
+# Stage 1: Dependencies
+################################################################################
+FROM node:22-alpine AS deps
+
+RUN corepack enable
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+COPY scripts ./scripts
+
+# Install ALL dependencies (for build)
+RUN pnpm install --frozen-lockfile
+
+################################################################################
+# Stage 2: Builder
+################################################################################
+FROM node:22-alpine AS builder
+
+# Install bash for build scripts
+RUN apk add --no-cache bash
+
+RUN corepack enable
+
+WORKDIR /app
+
+# Copy dependencies from deps stage
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/ui/node_modules ./ui/node_modules
+
+# Copy source code (scripts needed for build)
+COPY . .
+
+# Build the application
+ENV OPENCLAW_PREFER_PNPM=1
+RUN OPENCLAW_A2UI_SKIP_MISSING=1 pnpm build
+RUN pnpm ui:build
+
+################################################################################
+# Stage 3: Production dependencies
+################################################################################
+FROM node:22-alpine AS prod-deps
+
+# Install build dependencies for native modules
+RUN apk add --no-cache python3 make g++
+
+RUN corepack enable
+
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY ui/package.json ./ui/package.json
+COPY patches ./patches
+COPY scripts ./scripts
+
+# Install production-only dependencies (including optional peer deps)
+RUN pnpm install --frozen-lockfile --prod
+
+# Prune unnecessary files from node_modules to reduce size
+RUN find node_modules -type f -name "*.md" -delete && \
+    find node_modules -type f -name "*.ts" ! -name "*.d.ts" -delete && \
+    find node_modules -type d -name "test" -exec rm -rf {} + 2>/dev/null || true && \
+    find node_modules -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
+    find node_modules -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true && \
+    find node_modules -type f -name "*.map" -delete
+
+################################################################################
+# Stage 4: Production runtime (FINAL)
+################################################################################
+FROM node:22-alpine
+
+# Install runtime dependencies (glibc compatibility for native modules + tini for signal handling)
+RUN apk add --no-cache libc6-compat tini
+
+WORKDIR /app
+
+# Copy production node_modules (cleaned)
+COPY --from=prod-deps /app/node_modules ./node_modules
+
+# Copy built output
+COPY --from=builder /app/dist ./dist
+
+# Copy workspace extensions (with their node_modules from builder)
+COPY --from=builder /app/extensions ./extensions
+
+# Copy essential root files
+COPY --from=builder /app/package.json /app/pnpm-workspace.yaml /app/.npmrc ./
+COPY --from=builder /app/openclaw.mjs ./
+COPY --from=builder /app/skills ./skills
+COPY --from=builder /app/patches ./patches
+
+ENV NODE_ENV=production
+
+# Set ownership for non-root user (node user already exists in node:22-alpine)
+RUN chown -R node:node /app
+
+# Create symlink for openclaw binary to be available in PATH
+RUN ln -s /app/openclaw.mjs /usr/local/bin/openclaw && \
+    chmod +x /app/openclaw.mjs
+
+USER node
+
+# Use tini for proper signal handling
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/index.js"]
