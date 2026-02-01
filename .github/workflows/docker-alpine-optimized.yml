@@ -2,8 +2,6 @@ name: Docker Alpine Optimized Build
 
 on:
   push:
-    branches:
-      - main
     tags:
       - "v*"
   workflow_dispatch:
